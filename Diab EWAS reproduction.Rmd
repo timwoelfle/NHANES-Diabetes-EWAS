@@ -1,0 +1,90 @@
+---
+title: "NHANES Diabetes EWAS: Reproduction"
+author: "Tim Woelfle"
+date: "12/01/2019"
+output:
+  html_notebook:
+    code_folding: hide
+---
+
+This document replicates the main findings from [Table 1](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2873978/table/pone-0010746-t001/?report=objectonly) of the following publication: [Patel, C.J., Bhattacharya, J. & Butte, A.J. (2010) *An Environment-Wide Association Study (EWAS) on Type 2 Diabetes Mellitus.* PLoS ONE. [Online] 5 (5). Available from: doi:10.1371/journal.pone.0010746](https://doi.org/10.1371/journal.pone.0010746)
+
+Data from https://github.com/chiragjp/nhanes_scidata
+
+For a general overview of weighted survey regression see:  https://github.com/chiragjp/nhanes_scidata/blob/master/User_Guide.Rmd
+
+## Normalization of relevant variables
+
+"Most chemical exposure data arising from mass spectrometry or absorption measurements occurred within a very small range and had a right skew; thus, we log transformed these variables. Further, we applied a z-score transformation (adjusting each observation to the mean and scaling by the standard deviation) in order to compare odds ratios from the many regressions."
+
+```{r}
+load('nh_99-06.Rdata')
+
+# Log transform and then normalise (later called through regression formula)
+logNorm = function(x) {
+  x = log(x)
+  return((x - mean(x, na.rm=T)) / sd(x, na.rm=T))
+}
+```
+
+## Survey-weighted adjusted Log regression
+
+Investigate NHANES [1999/2000](https://wwwn.cdc.gov/nchs/nhanes/ContinuousNhanes/Default.aspx?BeginYear=1999), [2001/2002](https://wwwn.cdc.gov/nchs/nhanes/ContinuousNhanes/Default.aspx?BeginYear=2001), [2003/2004](https://wwwn.cdc.gov/nchs/nhanes/ContinuousNhanes/Default.aspx?BeginYear=2003) and [2005/2006](https://wwwn.cdc.gov/nchs/nhanes/ContinuousNhanes/Default.aspx?BeginYear=2005) cohorts together.
+
+Perform survey-weighted logistic regression for each of the following exposures from the above paper against diabetes (as defined by fasting blood sugar >= 126mg/dl): 'cis-beta-carotene', 'trans-beta-carotene', 'gamma-tocopherol', 'Heptachlor Epoxide' and 'PCB170'
+
+Adjust for BMI, age, sex, socio-economic-status and ethnicity. The numbers are nearly the same as in Table 1 from the above paper.
+
+```{r}
+suppressMessages(library(survey))
+
+nhanesLogRegDiab = function(exposure_var, adjust_for, data) {
+  dsn = svydesign(id=~SDMVPSU, strata=~SDMVSTRA, weights=~WTMEC2YR, nest=T, data=data)
+  
+  form = paste("I(LBXGLU >=126) ~ logNorm(", exposure_var, ") + ", paste(adjust_for, collapse="+"))
+  
+  mod = svyglm(as.formula(form), design=dsn, family=quasibinomial())
+  
+  return(mod)
+}
+
+exposures_of_interest = c('LBXCBC', 'LBXBEC', 'LBXGTC', 'LBXHPE', 'LBX170')
+names = list('LBXCBC'='cis-beta-carotene', 'LBXBEC'='trans-beta-carotene', 'LBXGTC'='gamma-tocopherol', 'LBXHPE'='Heptachlor Epoxide', 'LBX170'='PCB170')
+
+#subset for one cohort (1: 99/00, 2: 01/02, 3: 03/04, 4: 05/06)
+#dat = subset(MainTable, WTMEC2YR > 0 & SDDSRVYR == 3)
+
+# take all cohorts together
+dat = subset(MainTable, WTMEC2YR > 0)
+findings = data.frame(Cohort = c("2001-2006*", "2001-2006*", "1999-2006*", "1999-2004*", "1999-2004*"), row.names = exposures_of_interest)
+
+# Replicate key numbers of Table 1
+for (exposure in exposures_of_interest) {
+  adjust_for = c("BMXBMI", "RIDAGEYR", "female", "SES_LEVEL", "black", "white", "mexican", "other_hispanic", "other_eth", "SDDSRVYR") # adjusting for cohort (SDDSRVYR) only matters when taking all cohorts, when subsetting for one its coef will be 1 anyway
+  
+  # Identify subset of samples with all necessary variables
+  samples = dat[complete.cases(dat[, c(exposure, adjust_for)]),]
+  
+  # Run model
+  mod = nhanesLogRegDiab(exposure, adjust_for, samples)
+  
+  # Save findings
+  n_diab    = sum(samples$LBXGLU >= 126, na.rm=T)
+  n_no_diab = sum(samples$LBXGLU <  126, na.rm=T)
+  findings[exposure, "N T2D, No T2D"] = paste0(n_diab, ", ", n_no_diab)
+  
+  p = coef(summary(mod))[2,4]
+  findings[exposure, "P"] = signif(p,2)
+  
+  or = exp(coef(mod)[2])
+  or_ci_lo = exp(coef(mod)[2] - 1.96 * coef(summary(mod))[2,2])
+  or_ci_hi = exp(coef(mod)[2] + 1.96 * coef(summary(mod))[2,2])
+  
+  findings[exposure, "OR (95% CI)"] = paste0(signif(or,2), " (",
+                                             signif(or_ci_lo,2), "-",
+                                             signif(or_ci_hi,2), ")")
+}
+
+rownames(findings) = names[exposures_of_interest]
+findings
+```
